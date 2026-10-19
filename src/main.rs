@@ -26,6 +26,9 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+const EDITOR_VERSION: &str = "vscode/1.104.1";
+const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
+const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct Config {
@@ -440,9 +443,10 @@ async fn create_response(
         .client
         .post(CHAT_URL)
         .bearer_auth(copilot_token)
-        .header("User-Agent", "github-copilot-proxy/0.1")
-        .header("Editor-Version", "github-copilot-proxy/0.1")
-        .header("Editor-Plugin-Version", "github-copilot-proxy/0.1")
+        .header("User-Agent", COPILOT_USER_AGENT)
+        .header("Editor-Version", EDITOR_VERSION)
+        .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
+        .header("Copilot-Integration-Id", "vscode-chat")
         .json(&chat_request)
         .send()
         .await

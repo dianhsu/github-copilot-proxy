@@ -9,20 +9,24 @@ This uses GitHub's undocumented Copilot token, chat, and Responses endpoints. It
 Install Rust to run from source, or install the Windows MSI/macOS PKG from the [GitHub Releases](https://github.com/dianhsu/github-copilot-proxy/releases) page. The installers add `github-copilot-proxy` to the command-line path. Then run:
 
 ```powershell
+github-copilot-proxy --help
+github-copilot-proxy --version
 github-copilot-proxy setup
 github-copilot-proxy verify
-github-copilot-proxy
+github-copilot-proxy start
 github-copilot-proxy status
 github-copilot-proxy stop
 ```
 
+- Running `github-copilot-proxy` without a command displays help. Use `-h` or `--help` for help, including command-specific help such as `github-copilot-proxy setup --help`.
+- Use `--version` or `-V` to print the installed version.
 - `setup` performs GitHub's OAuth device flow directly: open the URL, enter the one-time code, then wait for authorization. It checks Copilot access and writes local config and credentials files.
 - `verify` checks the saved config and confirms the GitHub token can obtain a Copilot session token.
-- Running the command without an argument starts the proxy as a background service; running it again does not start a duplicate service.
+- `start` starts the proxy as a background service; running it again does not start a duplicate service.
 - `status` checks whether the proxy is responding and reports its address and PID when available.
 - `stop` stops the running service.
 
-To run from a source checkout instead, use `cargo run --release -- setup`, `cargo run --release -- verify`, `cargo run --release`, `cargo run --release -- status`, and `cargo run --release -- stop`. The `cargo status` and `cargo stop` aliases work in the repository.
+To run from a source checkout instead, use `cargo run --release -- setup`, `cargo run --release -- verify`, `cargo run --release -- start`, `cargo run --release -- status`, and `cargo run --release -- stop`. The `cargo status` and `cargo stop` aliases work in the repository.
 
 All user data is stored in `%USERPROFILE%\.github-copilot-proxy\` on Windows (or `$HOME/.github-copilot-proxy/` elsewhere): `config.json`, `credentials.json`, and the service PID file. The GitHub OAuth token is stored separately in `credentials.json`; keep your user account secure and do not share this file. On Unix it is created with owner-only permissions. `setup` defaults to `127.0.0.1:8080`; set `LISTEN_ADDR` before setup to choose another address. `GITHUB_TOKEN` can be set to use an existing token instead of device login.
 
@@ -47,6 +51,6 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-Choose a model identifier available to your Copilot account. Run `github-copilot-proxy run` before Codex.
+Choose a model identifier available to your Copilot account. Run `github-copilot-proxy start` before Codex.
 
 This minimal adapter supports text messages and function tools. Image input, other tool types, and genuine token-by-token streaming are not implemented; streaming requests receive a Responses-compatible event sequence after the upstream completion finishes.

@@ -56,20 +56,101 @@ struct CachedToken {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    match env::args().nth(1).as_deref() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = args.first().map(String::as_str);
+
+    if args.is_empty() || (args.len() == 1 && matches!(command, Some("help" | "-h" | "--help"))) {
+        print_help();
+        return Ok(());
+    }
+
+    if args.len() == 1 && matches!(command, Some("-V" | "--version")) {
+        println!("github-copilot-proxy {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if args.len() == 2
+        && matches!(args[1].as_str(), "-h" | "--help")
+        && matches!(
+            command,
+            Some("setup" | "verify" | "start" | "status" | "stop")
+        )
+    {
+        print_command_help(command.unwrap());
+        return Ok(());
+    }
+
+    if args.len() > 1 {
+        print_help();
+        return Err(io::Error::other(format!("unexpected argument: {}", args[1])).into());
+    }
+
+    match command {
         Some("setup") => setup().await?,
         Some("verify") => verify().await?,
-        Some("run") => run().await?,
+        Some("start") => start().await?,
         Some("status") => status().await?,
         Some("stop") => stop().await?,
         Some("__serve") => serve().await?,
-        None => run().await?,
-        _ => {
-            eprintln!("Usage: github-copilot-proxy [setup|verify|run|status|stop]");
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid command").into());
+        Some(command) => {
+            print_help();
+            return Err(io::Error::other(format!("unknown command: {command}")).into());
         }
+        None => unreachable!(),
     }
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        "\
+GitHub Copilot Proxy
+
+Usage: github-copilot-proxy <COMMAND>
+
+Commands:
+  setup     Sign in to GitHub Copilot and save local configuration
+  verify    Check the saved configuration and Copilot access
+  start     Start the proxy as a background service
+  status    Show whether the proxy service is running
+  stop      Stop the proxy service
+  help      Show this help
+
+Options:
+  -h, --help     Show this help
+  -V, --version  Show version
+
+Run `github-copilot-proxy <COMMAND> --help` for command-specific help."
+    );
+}
+
+fn print_command_help(command: &str) {
+    let (summary, details) = match command {
+        "setup" => (
+            "Sign in to GitHub Copilot and save local configuration.",
+            "Uses GITHUB_TOKEN when set; otherwise starts GitHub device authorization.\n  LISTEN_ADDR sets the initial listen address (default: 127.0.0.1:8080).",
+        ),
+        "verify" => (
+            "Check the saved configuration and Copilot access.",
+            "Requires a completed setup or GITHUB_TOKEN.",
+        ),
+        "start" => (
+            "Start the proxy as a background service.",
+            "Requires saved configuration and GitHub credentials. Does not start a duplicate service.",
+        ),
+        "status" => (
+            "Show whether the proxy service is running.",
+            "Uses the listen address from the saved configuration.",
+        ),
+        "stop" => (
+            "Stop the proxy service.",
+            "Stops the service recorded by the local PID file.",
+        ),
+        _ => unreachable!(),
+    };
+    println!(
+        "Usage: github-copilot-proxy {command}\n\n{summary}\n\n{details}\n\nOptions:\n  -h, --help  Show this help"
+    );
 }
 
 async fn setup() -> Result<(), Box<dyn Error>> {
@@ -109,7 +190,7 @@ async fn verify() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run() -> Result<(), Box<dyn Error>> {
+async fn start() -> Result<(), Box<dyn Error>> {
     let config = read_config(&config_path()?)?;
     let addr: SocketAddr = config.listen_addr.parse()?;
     let _ = github_token()?;

@@ -26,6 +26,7 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+const RESPONSES_URL: &str = "https://api.githubcopilot.com/responses";
 const EDITOR_VERSION: &str = "vscode/1.104.1";
 const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
@@ -442,7 +443,7 @@ async fn create_response(
     let upstream = state
         .client
         .post(CHAT_URL)
-        .bearer_auth(copilot_token)
+        .bearer_auth(&copilot_token)
         .header("User-Agent", COPILOT_USER_AGENT)
         .header("Editor-Version", EDITOR_VERSION)
         .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
@@ -458,6 +459,49 @@ async fn create_response(
         .await
         .map_err(|error| ApiError::upstream(format!("Could not read Copilot response: {error}")))?;
     if !status.is_success() {
+        if is_unsupported_api_for_model(&body) {
+            let is_streaming = request.get("stream").and_then(Value::as_bool) == Some(true);
+            let fallback = state
+                .client
+                .post(RESPONSES_URL)
+                .bearer_auth(&copilot_token)
+                .header("User-Agent", COPILOT_USER_AGENT)
+                .header("Editor-Version", EDITOR_VERSION)
+                .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
+                .header("Copilot-Integration-Id", "vscode-chat")
+                .json(&request)
+                .send()
+                .await
+                .map_err(|error| {
+                    ApiError::upstream(format!("Copilot Responses request failed: {error}"))
+                })?;
+            let fallback_status = fallback.status();
+            let fallback_body = fallback.text().await.map_err(|error| {
+                ApiError::upstream(format!(
+                    "Could not read Copilot Responses response: {error}"
+                ))
+            })?;
+            if !fallback_status.is_success() {
+                return Err(ApiError::new(
+                    fallback_status,
+                    format!("Copilot Responses returned HTTP {fallback_status}: {fallback_body}"),
+                ));
+            }
+            if is_streaming {
+                return Ok((
+                    [
+                        ("content-type", "text/event-stream"),
+                        ("cache-control", "no-cache"),
+                    ],
+                    fallback_body,
+                )
+                    .into_response());
+            }
+            let response: Value = serde_json::from_str(&fallback_body).map_err(|error| {
+                ApiError::upstream(format!("Invalid Copilot Responses response: {error}"))
+            })?;
+            return Ok(Json(response).into_response());
+        }
         return Err(ApiError::new(
             status,
             format!("Copilot returned HTTP {status}: {body}"),
@@ -472,6 +516,19 @@ async fn create_response(
     } else {
         Ok(Json(response).into_response())
     }
+}
+
+fn is_unsupported_api_for_model(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("unsupported_api_for_model")
 }
 
 async fn get_copilot_token(state: &AppState) -> Result<String, ApiError> {
@@ -961,6 +1018,17 @@ mod tests {
         assert_eq!(chat["messages"][1]["content"], "Hello");
         assert_eq!(chat["messages"][2]["tool_calls"][0]["id"], "call_1");
         assert_eq!(chat["tools"][0]["function"]["name"], "lookup");
+    }
+
+    #[test]
+    fn detects_models_that_require_the_responses_endpoint() {
+        assert!(is_unsupported_api_for_model(
+            r#"{"error":{"message":"not accessible via /chat/completions","code":"unsupported_api_for_model"}}"#
+        ));
+        assert!(!is_unsupported_api_for_model(
+            r#"{"error":{"code":"some_other_error"}}"#
+        ));
+        assert!(!is_unsupported_api_for_model("not json"));
     }
 
     #[test]

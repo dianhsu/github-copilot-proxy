@@ -1,8 +1,8 @@
 # GitHub Copilot Proxy
 
-A small local adapter that translates OpenAI Responses API requests from Codex into GitHub Copilot Chat Completions requests.
+A small local adapter that translates OpenAI Responses API requests from Codex into GitHub Copilot requests.
 
-This uses GitHub's undocumented Copilot token and chat endpoints. They can change without notice; this is not an official GitHub API or SDK. Use it only with a GitHub account that has Copilot access and in accordance with GitHub's terms.
+This uses GitHub's undocumented Copilot token, chat, and Responses endpoints. It first tries Chat Completions and automatically retries models that report `unsupported_api_for_model` through the Responses endpoint. These endpoints can change without notice; this is not an official GitHub API or SDK. Use it only with a GitHub account that has Copilot access and in accordance with GitHub's terms.
 
 ## Commands
 

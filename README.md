@@ -20,15 +20,17 @@ github-copilot-proxy stop
 
 - Running `github-copilot-proxy` without a command displays help. Use `-h` or `--help` for help, including command-specific help such as `github-copilot-proxy setup --help`.
 - Use `--version` or `-V` to print the installed version.
-- `setup` performs GitHub's OAuth device flow directly: open the URL, enter the one-time code, then wait for authorization. It checks Copilot access and writes local config and credentials files.
+- `setup` first prompts for the listen IP and port (first-run defaults: `127.0.0.1` and `6060`; an existing config is offered as the default on later setup runs). It then performs GitHub's OAuth device flow directly: open the URL, enter the one-time code, then wait for authorization. It checks Copilot access and writes local config and credentials files, then asks whether to install the login startup service (`Y` by default). Windows uses Task Scheduler, macOS uses a LaunchAgent, and Linux uses a systemd user unit.
 - `verify` checks the saved config and confirms the GitHub token can obtain a Copilot session token.
 - `start` starts the proxy as a background service; running it again does not start a duplicate service.
 - `status` checks whether the proxy is responding and reports its address and PID when available.
 - `stop` stops the running service.
 
+Accepting the setup prompt installs or updates the current user's startup entry and starts the proxy now. If the proxy is already running, the `start` command detects it and avoids launching a duplicate. Declining leaves any existing startup entry unchanged. The startup entry remains installed when using `stop`; it can start the proxy again at the next login. Linux startup installation requires systemd user services.
+
 To run from a source checkout instead, use `cargo run --release -- setup`, `cargo run --release -- verify`, `cargo run --release -- start`, `cargo run --release -- status`, and `cargo run --release -- stop`. The `cargo status` and `cargo stop` aliases work in the repository.
 
-All user data is stored in `%USERPROFILE%\.github-copilot-proxy\` on Windows (or `$HOME/.github-copilot-proxy/` elsewhere): `config.json`, `credentials.json`, and the service PID file. The GitHub OAuth token is stored separately in `credentials.json`; keep your user account secure and do not share this file. On Unix it is created with owner-only permissions. `setup` defaults to `127.0.0.1:8080`; set `LISTEN_ADDR` before setup to choose another address. `GITHUB_TOKEN` can be set to use an existing token instead of device login.
+All user data is stored in `%USERPROFILE%\.github-copilot-proxy\` on Windows (or `$HOME/.github-copilot-proxy/` elsewhere): `config.json`, `credentials.json`, and the service PID file. The GitHub OAuth token is stored separately in `credentials.json`; keep your user account secure and do not share this file. On Unix it is created with owner-only permissions. On first setup, `LISTEN_ADDR` can set the initial listen address instead of the default `127.0.0.1:6060`; setup lets you confirm or change its IP and port interactively. `GITHUB_TOKEN` can be set to use an existing token instead of device login.
 
 GitHub Actions uses the `[package].version` in `Cargo.toml` as the release version (`v<version>`). On pushes to `main`, it checks whether that version already has a GitHub Release; if not, it builds Windows x64 and macOS x64/arm64 installers and creates the release with all three packages. Pull requests build the installers for verification, and the workflow can be run manually to publish an unreleased version. Bump the Cargo version to publish the next release. The Windows installer adds its install folder to the system `PATH`; open a new terminal after installation. Packages are currently unsigned; macOS may show an unidentified-developer warning.
 

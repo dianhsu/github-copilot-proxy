@@ -13,7 +13,7 @@ use std::{
     error::Error,
     fs,
     io::{self, Write},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -30,6 +30,8 @@ const RESPONSES_URL: &str = "https://api.githubcopilot.com/responses";
 const EDITOR_VERSION: &str = "vscode/1.104.1";
 const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
+#[cfg(any(target_os = "macos", test))]
+const AUTOSTART_LABEL: &str = "com.dianhsu.github-copilot-proxy";
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct Config {
@@ -38,7 +40,7 @@ struct Config {
 }
 
 fn default_listen_addr() -> String {
-    "127.0.0.1:8080".into()
+    "127.0.0.1:6060".into()
 }
 
 #[derive(Clone)]
@@ -128,7 +130,7 @@ fn print_command_help(command: &str) {
     let (summary, details) = match command {
         "setup" => (
             "Sign in to GitHub Copilot and save local configuration.",
-            "Uses GITHUB_TOKEN when set; otherwise starts GitHub device authorization.\n  LISTEN_ADDR sets the initial listen address (default: 127.0.0.1:8080).",
+            "Prompts for the listen IP and port first (defaults: 127.0.0.1 and 6060).\n  Uses GITHUB_TOKEN when set; otherwise starts GitHub device authorization.\n  After setup, prompts to install or update the current-user login startup service.",
         ),
         "verify" => (
             "Check the saved configuration and Copilot access.",
@@ -155,20 +157,17 @@ fn print_command_help(command: &str) {
 
 async fn setup() -> Result<(), Box<dyn Error>> {
     let config_path = config_path()?;
+    let default_addr = setup_default_listen_addr(&config_path)?;
+    let listen_addr = prompt_listen_addr(default_addr)?;
     let github_token = match env::var("GITHUB_TOKEN") {
         Ok(token) if !token.is_empty() => token,
         _ => device_login(&Client::new()).await?,
     };
 
     fetch_copilot_token(&Client::new(), &github_token).await?;
-    let config = match fs::read_to_string(&config_path) {
-        Ok(contents) => serde_json::from_str(&contents)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Config {
-            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| default_listen_addr()),
-        },
-        Err(error) => return Err(error.into()),
+    let config = Config {
+        listen_addr: listen_addr.to_string(),
     };
-    config.listen_addr.parse::<SocketAddr>()?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -178,6 +177,246 @@ async fn setup() -> Result<(), Box<dyn Error>> {
     println!("Setup complete. Config saved to {}", config_path.display());
     println!("GitHub token saved to {}", credentials_path.display());
     println!("Run `github-copilot-proxy verify` to check access.");
+    install_autostart_prompt()?;
+    Ok(())
+}
+
+fn setup_default_listen_addr(config_path: &Path) -> Result<SocketAddr, Box<dyn Error>> {
+    match fs::read_to_string(config_path) {
+        Ok(contents) => {
+            let config: Config = serde_json::from_str(&contents)?;
+            Ok(config.listen_addr.parse()?)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| default_listen_addr());
+            Ok(addr.parse()?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn prompt_listen_addr(default: SocketAddr) -> Result<SocketAddr, Box<dyn Error>> {
+    let ip = loop {
+        let value = prompt_value("Listen IP", &default.ip().to_string())?;
+        match value.parse::<IpAddr>() {
+            Ok(ip) => break ip,
+            Err(error) => eprintln!("Invalid IP address: {error}"),
+        }
+    };
+
+    let port = loop {
+        let value = prompt_value("Listen port", &default.port().to_string())?;
+        match value.parse::<u16>() {
+            Ok(port) if port != 0 => break port,
+            Ok(_) => eprintln!("Port must be between 1 and 65535."),
+            Err(_) => eprintln!("Enter a port number between 1 and 65535."),
+        }
+    };
+
+    Ok(SocketAddr::new(ip, port))
+}
+
+fn prompt_value(label: &str, default: &str) -> Result<String, Box<dyn Error>> {
+    print!("{label} [{default}]: ");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    if io::stdin().read_line(&mut value)? == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Input ended").into());
+    }
+    let value = value.trim();
+    Ok(if value.is_empty() {
+        default.to_owned()
+    } else {
+        value.to_owned()
+    })
+}
+
+fn install_autostart_prompt() -> Result<(), Box<dyn Error>> {
+    loop {
+        print!("Install or update the current-user login startup service? [Y/n] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer)? == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Input ended").into());
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => {
+                install_autostart(&env::current_exe()?)?;
+                println!("Login startup service installed or updated.");
+                return Ok(());
+            }
+            "n" | "no" => {
+                println!("Login startup service unchanged.");
+                return Ok(());
+            }
+            _ => println!("Please answer Y or n."),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn install_autostart(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let task_action = format!("\"{}\" start", executable.display());
+    let status = Command::new("schtasks")
+        .args([
+            "/Create",
+            "/SC",
+            "ONLOGON",
+            "/TN",
+            "GitHub Copilot Proxy",
+            "/TR",
+            &task_action,
+            "/F",
+            "/RL",
+            "LIMITED",
+        ])
+        .status()?;
+    ensure_command_success(status, "Could not install the Windows login task")?;
+
+    let status = Command::new("schtasks")
+        .args(["/Run", "/TN", "GitHub Copilot Proxy"])
+        .status()?;
+    ensure_command_success(status, "Could not start the Windows login task")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_autostart(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let plist_path = home_dir()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{AUTOSTART_LABEL}.plist"));
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &plist_path,
+        launch_agent_plist(&executable.to_string_lossy()),
+    )?;
+
+    let domain = format!("gui/{}", current_uid()?);
+    let service = format!("{domain}/{AUTOSTART_LABEL}");
+    if Command::new("launchctl")
+        .args(["print", &service])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        let status = Command::new("launchctl")
+            .args(["bootout", &service])
+            .status()?;
+        ensure_command_success(status, "Could not reload the existing macOS login agent")?;
+    }
+    let status = Command::new("launchctl")
+        .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
+        .status()?;
+    ensure_command_success(status, "Could not install the macOS login agent")?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_autostart(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or(home_dir()?.join(".config"));
+    let unit_path = config_home
+        .join("systemd")
+        .join("user")
+        .join("github-copilot-proxy.service");
+    if let Some(parent) = unit_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&unit_path, systemd_user_unit(&executable.to_string_lossy()))?;
+
+    let status = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()?;
+    ensure_command_success(status, "Could not reload systemd user units")?;
+    let status = Command::new("systemctl")
+        .args(["--user", "enable", "github-copilot-proxy.service"])
+        .status()?;
+    ensure_command_success(status, "Could not enable the systemd user service")?;
+    let status = Command::new("systemctl")
+        .args(["--user", "restart", "github-copilot-proxy.service"])
+        .status()?;
+    ensure_command_success(status, "Could not start the systemd user service")?;
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn install_autostart(_executable: &Path) -> Result<(), Box<dyn Error>> {
+    Err(io::Error::other("Login startup services are not supported on this platform").into())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn launch_agent_plist(executable: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\n\
+         <key>Label</key><string>{}</string>\n\
+         <key>ProgramArguments</key><array><string>{}</string><string>start</string></array>\n\
+         <key>RunAtLoad</key><true/>\n\
+         </dict></plist>\n",
+        xml_escape(AUTOSTART_LABEL),
+        xml_escape(executable)
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[cfg(target_os = "macos")]
+fn current_uid() -> Result<String, Box<dyn Error>> {
+    let output = Command::new("id").arg("-u").output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("Could not determine current user ID").into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn systemd_user_unit(executable: &str) -> String {
+    let executable = systemd_escape(executable);
+    format!(
+        "[Unit]\nDescription=GitHub Copilot Proxy\n\n\
+         [Service]\nType=oneshot\nRemainAfterExit=yes\n\
+         ExecStart={executable} start\nExecStop={executable} stop\n\n\
+         [Install]\nWantedBy=default.target\n"
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn systemd_escape(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
+}
+
+fn home_dir() -> Result<PathBuf, Box<dyn Error>> {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Could not find home directory").into()
+        })
+}
+
+fn ensure_command_success(
+    status: std::process::ExitStatus,
+    message: &str,
+) -> Result<(), Box<dyn Error>> {
+    if !status.success() {
+        return Err(io::Error::other(format!("{message} (exit status: {status})")).into());
+    }
     Ok(())
 }
 
@@ -195,7 +434,7 @@ async fn start() -> Result<(), Box<dyn Error>> {
     let addr: SocketAddr = config.listen_addr.parse()?;
     let _ = github_token()?;
     let pid_path = pid_path()?;
-    if pid_path.exists() && service_is_running(addr).await {
+    if service_is_running(addr).await {
         println!("GitHub Copilot proxy is already running at http://{addr}");
         return Ok(());
     }
@@ -272,7 +511,10 @@ async fn service_is_running(addr: SocketAddr) -> bool {
     else {
         return false;
     };
-    response.status().is_success()
+    if !response.status().is_success() {
+        return false;
+    }
+    response.text().await.is_ok_and(|body| body.trim() == "ok")
 }
 
 async fn status() -> Result<(), Box<dyn Error>> {
@@ -354,10 +596,7 @@ fn pid_path() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn config_path() -> Result<PathBuf, Box<dyn Error>> {
-    let home = env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Could not find home directory"))?;
-    Ok(PathBuf::from(home)
+    Ok(home_dir()?
         .join(".github-copilot-proxy")
         .join("config.json"))
 }
@@ -1110,6 +1349,28 @@ mod tests {
             r#"{"error":{"code":"some_other_error"}}"#
         ));
         assert!(!is_unsupported_api_for_model("not json"));
+    }
+
+    #[test]
+    fn creates_login_startup_service_definitions() {
+        let plist = launch_agent_plist("C:\\Program Files\\proxy&tool.exe");
+        assert!(plist.contains("<string>C:\\Program Files\\proxy&amp;tool.exe</string>"));
+        assert!(plist.contains("<string>start</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+
+        let unit = systemd_user_unit("/opt/Proxy 100%/github-copilot-proxy");
+        assert!(unit.contains("Type=oneshot\nRemainAfterExit=yes"));
+        assert!(unit.contains("ExecStart=\"/opt/Proxy 100%%/github-copilot-proxy\" start"));
+        assert!(unit.contains("ExecStop=\"/opt/Proxy 100%%/github-copilot-proxy\" stop"));
+        assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn defaults_setup_to_loopback_on_port_6060() {
+        assert_eq!(default_listen_addr(), "127.0.0.1:6060");
+        let addr: SocketAddr = default_listen_addr().parse().unwrap();
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(addr.port(), 6060);
     }
 
     #[test]

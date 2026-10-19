@@ -1,0 +1,31 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="GitHub Copilot Proxy"
+           Manufacturer="dianhsu"
+           Version="$(var.PackageVersion)"
+           UpgradeCode="D1B3E1C6-8F39-4E51-B2A8-C625FE1A41E2"
+           Scope="perMachine"
+           InstallerVersion="500">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of GitHub Copilot Proxy is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="GitHub Copilot Proxy">
+        <Component Id="ProxyExecutable" Guid="*">
+          <File Id="ProxyExe"
+                Source="$(var.PublishDir)\github-copilot-proxy.exe"
+                KeyPath="yes" />
+          <Environment Id="AddInstallDirectoryToPath"
+                        Name="PATH"
+                        Value="[INSTALLFOLDER]"
+                        Part="last"
+                        Action="set"
+                        System="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentRef Id="ProxyExecutable" />
+    </Feature>
+  </Package>
+</Wix>

@@ -1,0 +1,89 @@
+name: Build installers
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          dotnet tool install --global wix --version "4.*"
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          wix build installer/windows/Package.wxs `
+            -arch x64 `
+            -d "PublishDir=$((Resolve-Path target/release).Path)" `
+            -d "PackageVersion=$version" `
+            -o "artifacts/github-copilot-proxy-windows-x64-$version.msi"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-installer
+          path: artifacts/*.msi
+          if-no-files-found: error
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x64
+          - runner: macos-26
+            target: aarch64-apple-darwin
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          cargo build --release --locked --target "${{ matrix.target }}"
+          mkdir -p "artifacts/root/usr/local/bin"
+          install -m 755 "target/${{ matrix.target }}/release/github-copilot-proxy" \
+            "artifacts/root/usr/local/bin/github-copilot-proxy"
+          pkgbuild \
+            --root artifacts/root \
+            --identifier com.dianhsu.github-copilot-proxy \
+            --version "$version" \
+            --install-location / \
+            "artifacts/github-copilot-proxy-macos-${{ matrix.arch }}-$version.pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-installer
+          path: artifacts/*.pkg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: "*-installer"
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
